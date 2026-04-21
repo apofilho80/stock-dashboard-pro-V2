@@ -65,6 +65,27 @@ def normalize_percent_like(value):
     return value * 100 if abs(value) <= 1 else value
 
 
+@st.cache_data(ttl=600)
+def fetch_company_name_yahoo(ticker):
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info
+        name = info.get("shortName") or info.get("longName") or ticker
+
+        suffixes = [
+            " Corporation", " Corp.", " Corp", " Inc.", " Inc",
+            " Ltd.", " Ltd", " Holdings", " Group", " PLC", " plc",
+            " Company", " Co.", " Co"
+        ]
+        for s in suffixes:
+            if name.endswith(s):
+                name = name[:-len(s)].strip()
+
+        return name
+    except Exception:
+        return ticker
+
+
 # =========================
 # TECHNICAL INDICATORS
 # =========================
@@ -509,21 +530,53 @@ def fetch_iv_data_yahoo(ticker):
                 "iv_note": "No usable call IV data from Yahoo"
             }
 
-        calls["distance"] = (calls["strike"] - spot).abs()
-        atm_row = calls.sort_values("distance").iloc[0]
-        atm_iv = to_float(atm_row.get("impliedVolatility"))
+        valid = calls.copy()
+        valid = valid[
+            valid["strike"].notna() &
+            valid["impliedVolatility"].notna()
+        ].copy()
+
+        valid = valid[
+            (valid["impliedVolatility"] >= 0.05) &
+            (valid["impliedVolatility"] <= 3.00)
+        ].copy()
+
+        if valid.empty:
+            return {
+                "atm_iv": None,
+                "iv_percentile_approx": None,
+                "iv_regime": "N/A",
+                "iv_note": "Yahoo returned no valid ATM IV rows"
+            }
+
+        valid["distance"] = (valid["strike"] - spot).abs()
+        valid = valid.sort_values("distance")
+
+        atm_row = valid.iloc[0]
+        atm_iv = to_float(atm_row["impliedVolatility"])
 
         atm_ivs = []
         for exp in expirations[:8]:
             try:
                 ch = tk.option_chain(exp)
                 c = ch.calls.copy()
+                if c.empty or "strike" not in c.columns or "impliedVolatility" not in c.columns:
+                    continue
+
+                c = c[
+                    c["strike"].notna() &
+                    c["impliedVolatility"].notna() &
+                    (c["impliedVolatility"] >= 0.05) &
+                    (c["impliedVolatility"] <= 3.00)
+                ].copy()
+
                 if c.empty:
                     continue
+
                 c["distance"] = (c["strike"] - spot).abs()
                 row = c.sort_values("distance").iloc[0]
-                iv_val = to_float(row.get("impliedVolatility"))
-                if iv_val is not None and iv_val > 0:
+                iv_val = to_float(row["impliedVolatility"])
+                if iv_val is not None:
                     atm_ivs.append(iv_val)
             except Exception:
                 continue
@@ -537,7 +590,7 @@ def fetch_iv_data_yahoo(ticker):
             "atm_iv": atm_iv,
             "iv_percentile_approx": iv_percentile_approx,
             "iv_regime": classify_iv(atm_iv),
-            "iv_note": "IV percentile is approximate (based on available expirations, not 1-year historical IV)"
+            "iv_note": "IV percentile is experimental and based on available expirations, not 1-year historical IV"
         }
 
     except Exception:
@@ -745,6 +798,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
         return None
 
     stock_data = compute_indicators(stock_data)
+    company_name = fetch_company_name_yahoo(ticker)
 
     fmp_data = fetch_fmp_fundamentals(ticker, fmp_api_key)
     finnhub_data = fetch_finnhub_fundamentals(ticker, finnhub_api_key)
@@ -815,6 +869,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
 
     return {
         "ticker": ticker,
+        "company_name": company_name,
         "data": stock_data,
         "fundamentals": fundamentals,
         "latest_close": latest_close,
@@ -919,7 +974,7 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
 st.sidebar.title("Controls")
 
 watchlist = ["NVDA", "MSFT", "AAPL", "AMZN", "META", "GOOGL", "AVGO", "MU", "NFLX", "ORCL"]
-ticker = st.sidebar.text_input("Ticker", value="NVDA").upper()
+ticker = st.sidebar.text_input("Ticker", value="").upper().strip()
 period = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
 
 fmp_api_key = FMP_API_KEY
@@ -939,14 +994,19 @@ tab_overview, tab_technical, tab_valuation, tab_options, tab_scanner = st.tabs(
 
 result = None
 if run:
-    result = load_analysis(ticker, period, fmp_api_key, finnhub_api_key)
-    if result is None:
-        st.error(f"No data found for {ticker}.")
+    if not ticker:
+        st.warning("Please enter a ticker.")
+    else:
+        result = load_analysis(ticker, period, fmp_api_key, finnhub_api_key)
+        if result is None:
+            st.error(f"No data found for {ticker}.")
 
 with tab_overview:
     if result is None:
-        st.info("Choose a ticker in the sidebar and click Run Analysis.")
+        st.info("Enter a ticker in the sidebar and click Run Analysis.")
     else:
+        st.markdown(f"### {result['company_name']}")
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Last Close", fmt_num(result["latest_close"]))
         c2.metric("Trailing P/E", fmt_num(result["trailing_pe"]))
@@ -1049,7 +1109,7 @@ with tab_options:
         st.subheader("Implied Volatility")
         iv1, iv2, iv3 = st.columns(3)
         iv1.metric("ATM IV", "N/A" if result["atm_iv"] is None else f"{result['atm_iv'] * 100:.1f}%")
-        iv2.metric("IV Percentile (Approx.)", "N/A" if result["iv_percentile_approx"] is None else f"{result['iv_percentile_approx']:.0f}")
+        iv2.metric("IV Rank (Exp.)", "N/A" if result["iv_percentile_approx"] is None else f"{result['iv_percentile_approx']:.0f}")
         iv3.metric("IV Regime", result["iv_regime"])
 
         st.caption(result["iv_note"])
