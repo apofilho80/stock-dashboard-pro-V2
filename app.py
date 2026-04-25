@@ -86,6 +86,43 @@ def fetch_company_name_yahoo(ticker):
         return ticker
 
 
+@st.cache_data(ttl=600)
+def fetch_earnings_date_yahoo(ticker):
+    try:
+        tk = yf.Ticker(ticker)
+
+        cal = tk.calendar
+        if cal is not None:
+            if isinstance(cal, pd.DataFrame) and not cal.empty:
+                for idx in cal.index:
+                    idx_str = str(idx).lower()
+                    if "earn" in idx_str:
+                        row = cal.loc[idx]
+                        if isinstance(row, pd.Series) and len(row) > 0:
+                            val = row.iloc[0]
+                            if pd.notna(val):
+                                return pd.to_datetime(val).strftime("%Y-%m-%d")
+            elif isinstance(cal, dict):
+                for k, v in cal.items():
+                    if "earn" in str(k).lower():
+                        if isinstance(v, (list, tuple)) and len(v) > 0 and pd.notna(v[0]):
+                            return pd.to_datetime(v[0]).strftime("%Y-%m-%d")
+                        if not isinstance(v, (list, tuple)) and pd.notna(v):
+                            return pd.to_datetime(v).strftime("%Y-%m-%d")
+
+        try:
+            ed = tk.earnings_dates
+            if ed is not None and not ed.empty:
+                next_dt = ed.index[0]
+                return pd.to_datetime(next_dt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+
 # =========================
 # TECHNICAL INDICATORS
 # =========================
@@ -799,6 +836,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
 
     stock_data = compute_indicators(stock_data)
     company_name = fetch_company_name_yahoo(ticker)
+    earnings_date = fetch_earnings_date_yahoo(ticker)
 
     fmp_data = fetch_fmp_fundamentals(ticker, fmp_api_key)
     finnhub_data = fetch_finnhub_fundamentals(ticker, finnhub_api_key)
@@ -854,6 +892,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
 
     fundamentals = pd.DataFrame([
         ["Data Source", data.get("source_used")],
+        ["Next Earnings Date", earnings_date],
         ["Market Cap", fmt_large_number(market_cap)],
         ["Trailing P/E", fmt_num(trailing_pe)],
         ["Forward P/E", fmt_num(forward_pe)],
@@ -870,6 +909,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
     return {
         "ticker": ticker,
         "company_name": company_name,
+        "earnings_date": earnings_date,
         "data": stock_data,
         "fundamentals": fundamentals,
         "latest_close": latest_close,
@@ -1006,6 +1046,7 @@ with tab_overview:
         st.info("Enter a ticker in the sidebar and click Run Analysis.")
     else:
         st.markdown(f"### {result['company_name']}")
+        st.write(f"**Next Earnings Date:** {result['earnings_date']}")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Last Close", fmt_num(result["latest_close"]))
