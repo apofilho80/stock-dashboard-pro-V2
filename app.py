@@ -20,6 +20,46 @@ st.set_page_config(
 )
 
 # =========================
+# MOBILE / UI CSS
+# =========================
+st.markdown("""
+<style>
+.decision-line {
+    font-size: 1.08rem;
+    line-height: 1.65;
+    margin-bottom: 0.65rem;
+}
+
+.company-name {
+    font-size: 2.1rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+}
+
+.earnings-line {
+    font-size: 1.05rem;
+    margin-bottom: 1.2rem;
+}
+
+@media (max-width: 768px) {
+    .decision-line {
+        font-size: 1.18rem !important;
+        line-height: 1.75 !important;
+        margin-bottom: 0.8rem !important;
+    }
+
+    .company-name {
+        font-size: 2.2rem !important;
+    }
+
+    .earnings-line {
+        font-size: 1.12rem !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
 # HELPERS
 # =========================
 def to_float(value):
@@ -1045,8 +1085,14 @@ with tab_overview:
     if result is None:
         st.info("Enter a ticker in the sidebar and click Run Analysis.")
     else:
-        st.markdown(f"### {result['company_name']}")
-        st.write(f"**Next Earnings Date:** {result['earnings_date']}")
+        st.markdown(
+            f"<div class='company-name'>{result['company_name']}</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<div class='earnings-line'><strong>Next Earnings Date:</strong> {result['earnings_date']}</div>",
+            unsafe_allow_html=True
+        )
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Last Close", fmt_num(result["latest_close"]))
@@ -1062,15 +1108,38 @@ with tab_overview:
 
         st.subheader("Decision Panel")
         d1, d2 = st.columns(2)
+
         with d1:
-            st.write(f"**Data Source:** {result['source_used']}")
-            st.write(f"**Valuation Verdict:** {result['valuation']}")
-            st.write(f"**Smart Valuation Style:** {result['smart_view']['valuation_style']}")
-            st.write(f"**Growth-Adjusted View:** {result['smart_view']['growth_adjusted_view']}")
+            st.markdown(
+                f"<div class='decision-line'><strong>Data Source:</strong> {result['source_used']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='decision-line'><strong>Valuation Verdict:</strong> {result['valuation']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='decision-line'><strong>Smart Valuation Style:</strong> {result['smart_view']['valuation_style']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='decision-line'><strong>Growth-Adjusted View:</strong> {result['smart_view']['growth_adjusted_view']}</div>",
+                unsafe_allow_html=True
+            )
+
         with d2:
-            st.write(f"**Setup Verdict:** {result['setup_verdict']}")
-            st.write(f"**Trade Decision:** {result['trade_view']}")
-            st.write(f"**Options Idea:** {result['options_view']}")
+            st.markdown(
+                f"<div class='decision-line'><strong>Setup Verdict:</strong> {result['setup_verdict']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='decision-line'><strong>Trade Decision:</strong> {result['trade_view']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='decision-line'><strong>Options Idea:</strong> {result['options_view']}</div>",
+                unsafe_allow_html=True
+            )
 
         st.subheader("Entry Zones")
         z1, z2, z3, z4 = st.columns(4)
