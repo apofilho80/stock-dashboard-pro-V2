@@ -705,7 +705,7 @@ def fetch_iv_data_yahoo(ticker):
 
         if not expirations:
             return {
-                "atm_iv": None,
+                "implied_volatility": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
                 "iv_note": "No option expirations available from Yahoo",
@@ -715,7 +715,7 @@ def fetch_iv_data_yahoo(ticker):
         hist = tk.history(period="5d")
         if hist.empty:
             return {
-                "atm_iv": None,
+                "implied_volatility": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
                 "iv_note": "No recent price available for IV calculation",
@@ -724,87 +724,77 @@ def fetch_iv_data_yahoo(ticker):
 
         spot = float(hist["Close"].iloc[-1])
 
+        def _representative_iv_from_chain(chain_df, spot_price):
+            if chain_df is None or chain_df.empty:
+                return None
+
+            if "strike" not in chain_df.columns or "impliedVolatility" not in chain_df.columns:
+                return None
+
+            df = chain_df.copy()
+            df = df[
+                df["strike"].notna() &
+                df["impliedVolatility"].notna()
+            ].copy()
+
+            df = df[
+                (df["impliedVolatility"] >= 0.05) &
+                (df["impliedVolatility"] <= 3.00)
+            ].copy()
+
+            if df.empty:
+                return None
+
+            df["moneyness_pct"] = (df["strike"] - spot_price).abs() / spot_price
+
+            near = df[df["moneyness_pct"] <= 0.10].copy()
+
+            if len(near) < 4:
+                near = df.sort_values("moneyness_pct").head(10).copy()
+
+            if near.empty:
+                return None
+
+            return float(near["impliedVolatility"].median())
+
         nearest_exp = expirations[0]
         chain = tk.option_chain(nearest_exp)
-        calls = chain.calls.copy()
 
-        if calls.empty or "strike" not in calls.columns or "impliedVolatility" not in calls.columns:
-            return {
-                "atm_iv": None,
-                "iv_percentile_approx": None,
-                "iv_regime": "N/A",
-                "iv_note": "No usable call IV data from Yahoo",
-                "iv_history_proxy": []
-            }
+        call_iv = _representative_iv_from_chain(chain.calls, spot)
+        put_iv = _representative_iv_from_chain(chain.puts, spot)
 
-        valid = calls.copy()
-        valid = valid[
-            valid["strike"].notna() &
-            valid["impliedVolatility"].notna()
-        ].copy()
+        iv_candidates = [x for x in [call_iv, put_iv] if x is not None]
+        implied_volatility = float(np.median(iv_candidates)) if iv_candidates else None
 
-        valid = valid[
-            (valid["impliedVolatility"] >= 0.05) &
-            (valid["impliedVolatility"] <= 3.00)
-        ].copy()
-
-        if valid.empty:
-            return {
-                "atm_iv": None,
-                "iv_percentile_approx": None,
-                "iv_regime": "N/A",
-                "iv_note": "Yahoo returned no valid ATM IV rows",
-                "iv_history_proxy": []
-            }
-
-        valid["distance"] = (valid["strike"] - spot).abs()
-        valid = valid.sort_values("distance")
-
-        atm_row = valid.iloc[0]
-        atm_iv = to_float(atm_row["impliedVolatility"])
-
-        atm_ivs = []
+        iv_history_proxy = []
         for exp in expirations[:8]:
             try:
                 ch = tk.option_chain(exp)
-                c = ch.calls.copy()
-                if c.empty or "strike" not in c.columns or "impliedVolatility" not in c.columns:
-                    continue
+                c_iv = _representative_iv_from_chain(ch.calls, spot)
+                p_iv = _representative_iv_from_chain(ch.puts, spot)
 
-                c = c[
-                    c["strike"].notna() &
-                    c["impliedVolatility"].notna() &
-                    (c["impliedVolatility"] >= 0.05) &
-                    (c["impliedVolatility"] <= 3.00)
-                ].copy()
-
-                if c.empty:
-                    continue
-
-                c["distance"] = (c["strike"] - spot).abs()
-                row = c.sort_values("distance").iloc[0]
-                iv_val = to_float(row["impliedVolatility"])
-                if iv_val is not None:
-                    atm_ivs.append(iv_val)
+                vals = [x for x in [c_iv, p_iv] if x is not None]
+                if vals:
+                    iv_history_proxy.append(float(np.median(vals)))
             except Exception:
                 continue
 
         iv_percentile_approx = None
-        if atm_iv is not None and len(atm_ivs) >= 3:
-            arr = np.array(sorted(atm_ivs))
-            iv_percentile_approx = float((arr <= atm_iv).sum() / len(arr) * 100)
+        if implied_volatility is not None and len(iv_history_proxy) >= 3:
+            arr = np.array(sorted(iv_history_proxy))
+            iv_percentile_approx = float((arr < implied_volatility).sum() / len(arr) * 100)
 
         return {
-            "atm_iv": atm_iv,
+            "implied_volatility": implied_volatility,
             "iv_percentile_approx": iv_percentile_approx,
-            "iv_regime": classify_iv(atm_iv),
-            "iv_note": "IV percentile is experimental and based on available expirations, not 1-year historical IV",
-            "iv_history_proxy": atm_ivs
+            "iv_regime": classify_iv(implied_volatility),
+            "iv_note": "Implied volatility is estimated from near-the-money calls and puts; IV percentile is experimental and based on available expirations, not 1-year historical IV",
+            "iv_history_proxy": iv_history_proxy
         }
 
     except Exception:
         return {
-            "atm_iv": None,
+            "implied_volatility": None,
             "iv_percentile_approx": None,
             "iv_regime": "N/A",
             "iv_note": "Yahoo options data unavailable",
@@ -1064,8 +1054,8 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
     iv_data = fetch_iv_data_yahoo(ticker)
 
     iv_history_proxy = iv_data.get("iv_history_proxy", [])
-    iv_rank = compute_iv_rank_from_history(iv_data.get("atm_iv"), iv_history_proxy)
-    iv_percentile_engine = compute_iv_percentile_from_history(iv_data.get("atm_iv"), iv_history_proxy)
+    iv_rank = compute_iv_rank_from_history(iv_data.get("implied_volatility"), iv_history_proxy)
+    iv_percentile_engine = compute_iv_percentile_from_history(iv_data.get("implied_volatility"), iv_history_proxy)
 
     near_earnings = False
     try:
@@ -1125,7 +1115,7 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
         "opt": opt,
         "ev_rel": ev_rel,
         "source_used": data.get("source_used"),
-        "atm_iv": iv_data.get("atm_iv"),
+        "implied_volatility": iv_data.get("implied_volatility"),
         "iv_percentile_approx": iv_data.get("iv_percentile_approx"),
         "iv_regime": iv_data.get("iv_regime"),
         "iv_note": iv_data.get("iv_note"),
@@ -1170,7 +1160,7 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
                 "Trend": result["trend_state"],
                 "Timing Score": to_float(result["timing_score"]),
                 "Timing": f'{result["timing_score"]} ({result["timing_label"]})',
-                "ATM IV": None if result.get("atm_iv") is None else round(result["atm_iv"] * 100, 1),
+                "Impl. Vol.": None if result.get("implied_volatility") is None else round(result["implied_volatility"] * 100, 1),
                 "IV %ile": None if result.get("iv_percentile_engine") is None else round(result["iv_percentile_engine"], 0),
                 "IV Rank": None if result.get("iv_rank") is None else round(result["iv_rank"], 0),
                 "IV Regime": result.get("iv_regime", "N/A"),
@@ -1199,7 +1189,7 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
     for col in ["Last Close", "Fwd P/E", "PEG", "Rule of 40"]:
         display_df[col] = display_df[col].apply(lambda x: "N/A" if pd.isna(x) else f"{x:.2f}")
 
-    display_df["ATM IV"] = display_df["ATM IV"].apply(lambda x: "N/A" if pd.isna(x) else f"{x:.1f}%")
+    display_df["Impl. Vol."] = display_df["Impl. Vol."].apply(lambda x: "N/A" if pd.isna(x) else f"{x:.1f}%")
     display_df["IV %ile"] = display_df["IV %ile"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
     display_df["IV Rank"] = display_df["IV Rank"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
     display_df["Options Score"] = display_df["Options Score"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
@@ -1377,9 +1367,18 @@ with tab_options:
 
         st.subheader("Implied Volatility")
         iv1, iv2, iv3 = st.columns(3)
-        iv1.metric("ATM IV", "N/A" if result["atm_iv"] is None else f"{result['atm_iv'] * 100:.1f}%")
-        iv2.metric("IV Rank (Approx.)", "N/A" if result["iv_rank"] is None else f"{result['iv_rank']:.0f}")
-        iv3.metric("IV Percentile (Approx.)", "N/A" if result["iv_percentile_engine"] is None else f"{result['iv_percentile_engine']:.0f}")
+        iv1.metric(
+            "Impl. Vol.",
+            "N/A" if result["implied_volatility"] is None else f"{result['implied_volatility'] * 100:.1f}%"
+        )
+        iv2.metric(
+            "IV Rank (Approx.)",
+            "N/A" if result["iv_rank"] is None else f"{result['iv_rank']:.0f}"
+        )
+        iv3.metric(
+            "IV Percentile (Approx.)",
+            "N/A" if result["iv_percentile_engine"] is None else f"{result['iv_percentile_engine']:.0f}"
+        )
 
         st.caption(result["iv_note"])
 
@@ -1446,7 +1445,7 @@ with tab_scanner:
             st.warning("No scan results returned.")
         else:
             preferred_cols = [
-                "Ticker", "Last Close", "Trend", "Timing", "ATM IV", "IV %ile",
+                "Ticker", "Last Close", "Trend", "Timing", "Impl. Vol.", "IV %ile",
                 "IV Rank", "IV Regime", "Setup Label", "Options Score",
                 "Valuation Style", "Trade Idea", "Fwd P/E", "PEG",
                 "Rule of 40", "Source"
