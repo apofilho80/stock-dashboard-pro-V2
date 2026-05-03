@@ -570,6 +570,133 @@ def options_setup_label(iv_percentile_approx, iv_regime, options_view, trend_sta
     return "Balanced / Mixed"
 
 
+def _normalize_iv_to_percent(value):
+    v = to_float(value)
+    if v is None or v <= 0:
+        return None
+    return v * 100.0 if v <= 3.0 else v
+
+
+def _clean_iv_history(iv_history):
+    cleaned = []
+    for x in iv_history:
+        v = _normalize_iv_to_percent(x)
+        if v is None:
+            continue
+        cleaned.append(v)
+    return cleaned
+
+
+def compute_iv_percentile_from_history(current_iv, iv_history):
+    current_iv_pct = _normalize_iv_to_percent(current_iv)
+    history_pct = _clean_iv_history(iv_history)
+
+    if current_iv_pct is None or len(history_pct) < 3:
+        return None
+
+    days_below = sum(1 for historical_iv in history_pct if historical_iv < current_iv_pct)
+    return (days_below / len(history_pct)) * 100.0
+
+
+def compute_iv_rank_from_history(current_iv, iv_history):
+    current_iv_pct = _normalize_iv_to_percent(current_iv)
+    history_pct = _clean_iv_history(iv_history)
+
+    if current_iv_pct is None or len(history_pct) < 3:
+        return None
+
+    iv_low = min(history_pct)
+    iv_high = max(history_pct)
+
+    if iv_high == iv_low:
+        return None
+
+    return ((current_iv_pct - iv_low) / (iv_high - iv_low)) * 100.0
+
+
+def iv_decision_engine(trend, iv_percentile, near_earnings=False):
+    trend = (trend or "neutral").strip().lower()
+
+    if iv_percentile is None:
+        return {
+            "decision": "Wait",
+            "typical_strategy": "No strong IV edge",
+            "explanation": "IV percentile unavailable."
+        }
+
+    if near_earnings:
+        if iv_percentile >= 70:
+            return {
+                "decision": "Wait / Event Risk",
+                "typical_strategy": "Defined-risk premium selling only",
+                "explanation": "Earnings is near and IV is elevated."
+            }
+        return {
+            "decision": "Wait / Event Risk",
+            "typical_strategy": "Small defined-risk only",
+            "explanation": "Earnings is near."
+        }
+
+    if trend == "bullish trend":
+        if iv_percentile <= 25:
+            return {
+                "decision": "Good Buy",
+                "typical_strategy": "Shares or ITM LEAPS",
+                "explanation": "Bullish trend with relatively cheap options."
+            }
+        elif iv_percentile >= 75:
+            return {
+                "decision": "Good Buy for Premium Selling",
+                "typical_strategy": "Bull put spread",
+                "explanation": "Bullish trend with relatively rich option premium."
+            }
+        else:
+            return {
+                "decision": "Watch / Selective Buy",
+                "typical_strategy": "Defined-risk bullish structure",
+                "explanation": "Bullish trend, but IV is mid-range."
+            }
+
+    if trend == "bearish trend":
+        if iv_percentile >= 75:
+            return {
+                "decision": "Good Sell / Bearish Premium Setup",
+                "typical_strategy": "Bear call spread",
+                "explanation": "Bearish trend with rich premium."
+            }
+        elif iv_percentile <= 25:
+            return {
+                "decision": "Possible Bearish Buy",
+                "typical_strategy": "Long puts or put debit spread",
+                "explanation": "Bearish trend with relatively cheap options."
+            }
+        else:
+            return {
+                "decision": "Wait / Bearish Bias",
+                "typical_strategy": "Small bearish defined-risk structure",
+                "explanation": "Bearish trend, but IV is mid-range."
+            }
+
+    if iv_percentile <= 20:
+        return {
+            "decision": "Possible Buy",
+            "typical_strategy": "Long premium if thesis is strong",
+            "explanation": "Trend is mixed, but options are relatively cheap."
+        }
+    elif iv_percentile >= 80:
+        return {
+            "decision": "Possible Sell / Premium Opportunity",
+            "typical_strategy": "Credit spreads or iron condor",
+            "explanation": "Trend is mixed, but options are relatively expensive."
+        }
+
+    return {
+        "decision": "Wait",
+        "typical_strategy": "No strong edge",
+        "explanation": "Trend and IV context are neutral."
+    }
+
+
 @st.cache_data(ttl=900)
 def fetch_iv_data_yahoo(ticker):
     try:
@@ -581,7 +708,8 @@ def fetch_iv_data_yahoo(ticker):
                 "atm_iv": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
-                "iv_note": "No option expirations available from Yahoo"
+                "iv_note": "No option expirations available from Yahoo",
+                "iv_history_proxy": []
             }
 
         hist = tk.history(period="5d")
@@ -590,7 +718,8 @@ def fetch_iv_data_yahoo(ticker):
                 "atm_iv": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
-                "iv_note": "No recent price available for IV calculation"
+                "iv_note": "No recent price available for IV calculation",
+                "iv_history_proxy": []
             }
 
         spot = float(hist["Close"].iloc[-1])
@@ -604,7 +733,8 @@ def fetch_iv_data_yahoo(ticker):
                 "atm_iv": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
-                "iv_note": "No usable call IV data from Yahoo"
+                "iv_note": "No usable call IV data from Yahoo",
+                "iv_history_proxy": []
             }
 
         valid = calls.copy()
@@ -623,7 +753,8 @@ def fetch_iv_data_yahoo(ticker):
                 "atm_iv": None,
                 "iv_percentile_approx": None,
                 "iv_regime": "N/A",
-                "iv_note": "Yahoo returned no valid ATM IV rows"
+                "iv_note": "Yahoo returned no valid ATM IV rows",
+                "iv_history_proxy": []
             }
 
         valid["distance"] = (valid["strike"] - spot).abs()
@@ -667,7 +798,8 @@ def fetch_iv_data_yahoo(ticker):
             "atm_iv": atm_iv,
             "iv_percentile_approx": iv_percentile_approx,
             "iv_regime": classify_iv(atm_iv),
-            "iv_note": "IV percentile is experimental and based on available expirations, not 1-year historical IV"
+            "iv_note": "IV percentile is experimental and based on available expirations, not 1-year historical IV",
+            "iv_history_proxy": atm_ivs
         }
 
     except Exception:
@@ -675,7 +807,8 @@ def fetch_iv_data_yahoo(ticker):
             "atm_iv": None,
             "iv_percentile_approx": None,
             "iv_regime": "N/A",
-            "iv_note": "Yahoo options data unavailable"
+            "iv_note": "Yahoo options data unavailable",
+            "iv_history_proxy": []
         }
 
 
@@ -930,6 +1063,26 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
     ev_rel = ev_ebitda_relative_view(ev_to_ebitda)
     iv_data = fetch_iv_data_yahoo(ticker)
 
+    iv_history_proxy = iv_data.get("iv_history_proxy", [])
+    iv_rank = compute_iv_rank_from_history(iv_data.get("atm_iv"), iv_history_proxy)
+    iv_percentile_engine = compute_iv_percentile_from_history(iv_data.get("atm_iv"), iv_history_proxy)
+
+    near_earnings = False
+    try:
+        if earnings_date != "N/A":
+            ed = pd.to_datetime(earnings_date).date()
+            today = pd.Timestamp.today().date()
+            days_to_earnings = (ed - today).days
+            near_earnings = 0 <= days_to_earnings <= 14
+    except Exception:
+        near_earnings = False
+
+    iv_decision = iv_decision_engine(
+        trend=trend_state,
+        iv_percentile=iv_percentile_engine,
+        near_earnings=near_earnings
+    )
+
     fundamentals = pd.DataFrame([
         ["Data Source", data.get("source_used")],
         ["Next Earnings Date", earnings_date],
@@ -976,6 +1129,10 @@ def load_analysis(ticker, period, fmp_api_key, finnhub_api_key):
         "iv_percentile_approx": iv_data.get("iv_percentile_approx"),
         "iv_regime": iv_data.get("iv_regime"),
         "iv_note": iv_data.get("iv_note"),
+        "iv_rank": iv_rank,
+        "iv_percentile_engine": iv_percentile_engine,
+        "iv_decision": iv_decision,
+        "near_earnings": near_earnings,
     }
 
 
@@ -995,13 +1152,13 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
             options_score = options_setup_score(
                 trend_state=result["trend_state"],
                 timing_score=result["timing_score"],
-                iv_percentile_approx=result.get("iv_percentile_approx"),
+                iv_percentile_approx=result.get("iv_percentile_engine"),
                 iv_regime=result.get("iv_regime"),
                 options_view=result["options_view"]
             )
 
             setup_label = options_setup_label(
-                iv_percentile_approx=result.get("iv_percentile_approx"),
+                iv_percentile_approx=result.get("iv_percentile_engine"),
                 iv_regime=result.get("iv_regime"),
                 options_view=result["options_view"],
                 trend_state=result["trend_state"]
@@ -1014,7 +1171,8 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
                 "Timing Score": to_float(result["timing_score"]),
                 "Timing": f'{result["timing_score"]} ({result["timing_label"]})',
                 "ATM IV": None if result.get("atm_iv") is None else round(result["atm_iv"] * 100, 1),
-                "IV %ile": None if result.get("iv_percentile_approx") is None else round(result["iv_percentile_approx"], 0),
+                "IV %ile": None if result.get("iv_percentile_engine") is None else round(result["iv_percentile_engine"], 0),
+                "IV Rank": None if result.get("iv_rank") is None else round(result["iv_rank"], 0),
                 "IV Regime": result.get("iv_regime", "N/A"),
                 "Setup Label": setup_label,
                 "Options Score": options_score,
@@ -1043,6 +1201,7 @@ def scan_watchlist(tickers, period, fmp_api_key, finnhub_api_key):
 
     display_df["ATM IV"] = display_df["ATM IV"].apply(lambda x: "N/A" if pd.isna(x) else f"{x:.1f}%")
     display_df["IV %ile"] = display_df["IV %ile"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
+    display_df["IV Rank"] = display_df["IV Rank"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
     display_df["Options Score"] = display_df["Options Score"].apply(lambda x: "N/A" if pd.isna(x) else f"{int(x)}")
 
     return display_df
@@ -1219,32 +1378,32 @@ with tab_options:
         st.subheader("Implied Volatility")
         iv1, iv2, iv3 = st.columns(3)
         iv1.metric("ATM IV", "N/A" if result["atm_iv"] is None else f"{result['atm_iv'] * 100:.1f}%")
-        iv2.metric("IV Rank (Exp.)", "N/A" if result["iv_percentile_approx"] is None else f"{result['iv_percentile_approx']:.0f}")
-        iv3.metric("IV Regime", result["iv_regime"])
+        iv2.metric("IV Rank (Approx.)", "N/A" if result["iv_rank"] is None else f"{result['iv_rank']:.0f}")
+        iv3.metric("IV Percentile (Approx.)", "N/A" if result["iv_percentile_engine"] is None else f"{result['iv_percentile_engine']:.0f}")
 
         st.caption(result["iv_note"])
 
-        st.subheader("IV-Based Interpretation")
-        atm_iv = result["atm_iv"]
-        iv_pct = result["iv_percentile_approx"]
-
-        if atm_iv is None:
-            st.write("**IV Takeaway:** IV data unavailable for this ticker from Yahoo.")
-        else:
-            if iv_pct is not None:
-                if iv_pct >= 70:
-                    st.write("**IV Takeaway:** Volatility is relatively elevated. Better environment for premium selling strategies.")
-                elif iv_pct <= 30:
-                    st.write("**IV Takeaway:** Volatility is relatively low. Better environment for directional long options like ITM LEAPS.")
-                else:
-                    st.write("**IV Takeaway:** Volatility is in a middle range. Use balanced strategy selection.")
-            else:
-                if atm_iv >= 0.45:
-                    st.write("**IV Takeaway:** High IV environment. Bull put spreads may be more attractive than outright call buying.")
-                elif atm_iv <= 0.25:
-                    st.write("**IV Takeaway:** Lower IV environment. Long calls / LEAPS are relatively more attractive.")
-                else:
-                    st.write("**IV Takeaway:** Moderate IV environment. Either defined-risk spreads or LEAPS can work depending on setup.")
+        st.subheader("IV-Based Decision")
+        st.markdown(
+            f"<div class='decision-line'><strong>Decision:</strong> {result['iv_decision']['decision']}</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<div class='decision-line'><strong>Typical Strategy:</strong> {result['iv_decision']['typical_strategy']}</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<div class='decision-line'><strong>Explanation:</strong> {result['iv_decision']['explanation']}</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<div class='decision-line'><strong>IV Regime:</strong> {result['iv_regime']}</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<div class='decision-line'><strong>Near Earnings:</strong> {result['near_earnings']}</div>",
+            unsafe_allow_html=True
+        )
 
 with tab_scanner:
     st.subheader("Scanner")
@@ -1288,8 +1447,9 @@ with tab_scanner:
         else:
             preferred_cols = [
                 "Ticker", "Last Close", "Trend", "Timing", "ATM IV", "IV %ile",
-                "IV Regime", "Setup Label", "Options Score", "Valuation Style",
-                "Trade Idea", "Fwd P/E", "PEG", "Rule of 40", "Source"
+                "IV Rank", "IV Regime", "Setup Label", "Options Score",
+                "Valuation Style", "Trade Idea", "Fwd P/E", "PEG",
+                "Rule of 40", "Source"
             ]
             existing_cols = [c for c in preferred_cols if c in universe_df.columns]
             st.dataframe(universe_df[existing_cols], use_container_width=True, hide_index=True)
